@@ -38,6 +38,7 @@
 
 #include <px4_config.h>
 #include <px4_defines.h>
+#include <ecl/geo/geo.h>
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -53,7 +54,7 @@
 #include <math.h>
 #include <unistd.h>
 
-#include <systemlib/perf_counter.h>
+#include <perf/perf_counter.h>
 #include <systemlib/err.h>
 #include <nuttx/arch.h>
 #include <nuttx/wqueue.h>
@@ -277,7 +278,7 @@ BMA180::init()
 	}
 
 	/* allocate basic report buffers */
-	_reports = new ringbuffer::RingBuffer(2, sizeof(accel_report));
+	_reports = new ringbuffer::RingBuffer(2, sizeof(sensor_accel_s));
 
 	if (_reports == nullptr) {
 		goto out;
@@ -324,7 +325,7 @@ BMA180::init()
 	measure();
 
 	if (_class_instance == CLASS_DEVICE_PRIMARY) {
-		struct accel_report arp;
+		sensor_accel_s arp;
 		_reports->get(&arp);
 
 		/* measurement will have generated a report, publish */
@@ -351,8 +352,8 @@ BMA180::probe()
 ssize_t
 BMA180::read(struct file *filp, char *buffer, size_t buflen)
 {
-	unsigned count = buflen / sizeof(struct accel_report);
-	struct accel_report *arp = reinterpret_cast<struct accel_report *>(buffer);
+	unsigned count = buflen / sizeof(sensor_accel_s);
+	sensor_accel_s *arp = reinterpret_cast<sensor_accel_s *>(buffer);
 	int ret = 0;
 
 	/* buffer must be large enough */
@@ -399,22 +400,12 @@ BMA180::ioctl(struct file *filp, int cmd, unsigned long arg)
 	case SENSORIOCSPOLLRATE: {
 			switch (arg) {
 
-			/* switching to manual polling */
-			case SENSOR_POLLRATE_MANUAL:
-				stop();
-				_call_interval = 0;
-				return OK;
-
-			/* external signalling not supported */
-			case SENSOR_POLLRATE_EXTERNAL:
-
 			/* zero would be bad */
 			case 0:
 				return -EINVAL;
 
 
-			/* set default/max polling rate */
-			case SENSOR_POLLRATE_MAX:
+			/* set default polling rate */
 			case SENSOR_POLLRATE_DEFAULT:
 				/* With internal low pass filters enabled, 250 Hz is sufficient */
 				return ioctl(filp, SENSORIOCSPOLLRATE, 250);
@@ -446,56 +437,14 @@ BMA180::ioctl(struct file *filp, int cmd, unsigned long arg)
 			}
 		}
 
-	case SENSORIOCGPOLLRATE:
-		if (_call_interval == 0) {
-			return SENSOR_POLLRATE_MANUAL;
-		}
-
-		return 1000000 / _call_interval;
-
-	case SENSORIOCSQUEUEDEPTH: {
-			/* lower bound is mandatory, upper bound is a sanity check */
-			if ((arg < 2) || (arg > 100)) {
-				return -EINVAL;
-			}
-
-			irqstate_t flags = px4_enter_critical_section();
-
-			if (!_reports->resize(arg)) {
-				px4_leave_critical_section(flags);
-				return -ENOMEM;
-			}
-
-			px4_leave_critical_section(flags);
-
-			return OK;
-		}
-
 	case SENSORIOCRESET:
 		/* XXX implement */
 		return -EINVAL;
-
-	case ACCELIOCSSAMPLERATE:	/* sensor sample rate is not (really) adjustable */
-		return -EINVAL;
-
-	case ACCELIOCGSAMPLERATE:
-		return 1200;		/* always operating in low-noise mode */
 
 	case ACCELIOCSSCALE:
 		/* copy scale in */
 		memcpy(&_accel_scale, (struct accel_calibration_s *) arg, sizeof(_accel_scale));
 		return OK;
-
-	case ACCELIOCGSCALE:
-		/* copy scale out */
-		memcpy((struct accel_calibration_s *) arg, &_accel_scale, sizeof(_accel_scale));
-		return OK;
-
-	case ACCELIOCSRANGE:
-		return set_range(arg);
-
-	case ACCELIOCGRANGE:
-		return _current_range;
 
 	default:
 		/* give it to the superclass */
@@ -575,7 +524,7 @@ BMA180::set_range(unsigned max_g)
 	}
 
 	/* set new range scaling factor */
-	_accel_range_m_s2 = _current_range * 9.80665f;
+	_accel_range_m_s2 = _current_range * CONSTANTS_ONE_G;
 	_accel_range_scale = _accel_range_m_s2 / 8192.0f;
 
 	/* enable writing to chip config */
@@ -680,7 +629,7 @@ BMA180::measure()
 // 	} raw_report;
 // #pragma pack(pop)
 
-	struct accel_report report;
+	sensor_accel_s report;
 
 	/* start the performance counter */
 	perf_begin(_sample_perf);
@@ -726,7 +675,6 @@ BMA180::measure()
 	report.y = ((report.y_raw * _accel_range_scale) - _accel_scale.y_offset) * _accel_scale.y_scale;
 	report.z = ((report.z_raw * _accel_range_scale) - _accel_scale.z_offset) * _accel_scale.z_scale;
 	report.scaling = _accel_range_scale;
-	report.range_m_s2 = _accel_range_m_s2;
 
 	_reports->force(&report);
 
@@ -816,20 +764,17 @@ void
 test()
 {
 	int fd = -1;
-	struct accel_report a_report;
+	sensor_accel_s a_report;
 	ssize_t sz;
 
 	/* get the driver */
 	fd = open(ACCEL_DEVICE_PATH, O_RDONLY);
 
-	if (fd < 0)
+	if (fd < 0) {
 		err(1, "%s open failed (try 'bma180 start' if the driver is not running)",
 		    ACCEL_DEVICE_PATH);
-
-	/* reset to manual polling */
-	if (ioctl(fd, SENSORIOCSPOLLRATE, SENSOR_POLLRATE_MANUAL) < 0) {
-		err(1, "reset to manual polling");
 	}
+
 
 	/* do a simple demand read */
 	sz = read(fd, &a_report, sizeof(a_report));
@@ -838,18 +783,7 @@ test()
 		err(1, "immediate acc read failed");
 	}
 
-	warnx("single read");
-	warnx("time:     %lld", a_report.timestamp);
-	warnx("acc  x:  \t%8.4f\tm/s^2", (double)a_report.x);
-	warnx("acc  y:  \t%8.4f\tm/s^2", (double)a_report.y);
-	warnx("acc  z:  \t%8.4f\tm/s^2", (double)a_report.z);
-	warnx("acc  x:  \t%d\traw 0x%0x", (short)a_report.x_raw, (unsigned short)a_report.x_raw);
-	warnx("acc  y:  \t%d\traw 0x%0x", (short)a_report.y_raw, (unsigned short)a_report.y_raw);
-	warnx("acc  z:  \t%d\traw 0x%0x", (short)a_report.z_raw, (unsigned short)a_report.z_raw);
-	warnx("acc range: %8.4f m/s^2 (%8.4f g)", (double)a_report.range_m_s2,
-	      (double)(a_report.range_m_s2 / 9.81f));
-
-	/* XXX add poll-rate tests here too */
+	print_message(a_report);
 
 	reset();
 	errx(0, "PASS");
@@ -900,9 +834,12 @@ info()
 int
 bma180_main(int argc, char *argv[])
 {
+	if (argc < 2) {
+		goto out_error;
+	}
+
 	/*
 	 * Start/load the driver.
-
 	 */
 	if (!strcmp(argv[1], "start")) {
 		bma180::start();
@@ -929,5 +866,6 @@ bma180_main(int argc, char *argv[])
 		bma180::info();
 	}
 
+out_error:
 	errx(1, "unrecognised command, try 'start', 'test', 'reset' or 'info'");
 }

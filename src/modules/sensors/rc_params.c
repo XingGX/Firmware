@@ -1528,7 +1528,7 @@ PARAM_DEFINE_INT32(RC_MAP_ACRO_SW, 0);
 PARAM_DEFINE_INT32(RC_MAP_OFFB_SW, 0);
 
 /**
- * Kill switch channel
+ * Emergency Kill switch channel
  *
  * @min 0
  * @max 18
@@ -1556,7 +1556,10 @@ PARAM_DEFINE_INT32(RC_MAP_OFFB_SW, 0);
 PARAM_DEFINE_INT32(RC_MAP_KILL_SW, 0);
 
 /**
- * Arm switch channel
+ * Arm switch channel.
+ *
+ * Use it to arm/disarm via switch instead of default throttle stick. If this is
+ * assigned, arming and disarming via stick is disabled.
  *
  * @min 0
  * @max 18
@@ -2214,8 +2217,9 @@ PARAM_DEFINE_FLOAT(RC_FLT_SMP_RATE, 50.0f);
  * Cutoff frequency for the low pass filter on roll, pitch, yaw and throttle
  *
  * Does not get set unless below RC_FLT_SMP_RATE/2 because of filter instability characteristics.
+ * Set to 0 to disable the filter.
  *
- * @min 0.1
+ * @min 0
  * @unit Hz
  * @group Radio Calibration
  */
